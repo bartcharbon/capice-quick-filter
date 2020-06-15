@@ -34,14 +34,14 @@ public class Main
          * Input .VCF.GZ file
          */
         File input = new File(args[0]);
-        if(!input.getName().endsWith(".vcf.gz"))
+        if(!(input.getName().endsWith(".vcf.gz") || input.getName().endsWith(".vcf")))
         {
-            System.out.println("Input GZipped VCF file name '" + input.getName() + "' does not end in '.vcf.gz'. Are you sure this is a valid input?");
+            System.out.println("Input VCF file name '" + input.getName() + "' does not end in .vcf' or '.vcf.gz'. Are you sure this is a valid input?");
             System.exit(0);
         }
         if(!input.exists())
         {
-            System.out.println("Input GZipped VCF file not found at " + input.getAbsolutePath()+".");
+            System.out.println("Input VCF file not found at " + input.getAbsolutePath()+".");
             System.exit(0);
         }
 

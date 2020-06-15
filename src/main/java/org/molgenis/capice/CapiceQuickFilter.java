@@ -1,15 +1,16 @@
 package org.molgenis.capice;
 
-import net.sf.samtools.util.BlockCompressedInputStream;
-import org.molgenis.genotype.Allele;
-import org.molgenis.vcf.VcfReader;
-import org.molgenis.vcf.VcfRecord;
-import org.molgenis.vcf.VcfSample;
-import org.molgenis.vcf.meta.VcfMeta;
+import htsjdk.variant.variantcontext.Allele;
+import htsjdk.variant.variantcontext.Genotype;
+import htsjdk.variant.variantcontext.VariantContext;
+import htsjdk.variant.variantcontext.writer.VariantContextWriter;
+import htsjdk.variant.variantcontext.writer.VariantContextWriterBuilder;
+import htsjdk.variant.vcf.VCFFileReader;
 
-import java.io.BufferedWriter;
+import htsjdk.variant.vcf.VCFHeader;
+import htsjdk.variant.vcf.VCFHeaderLine;
+import htsjdk.variant.vcf.VCFSampleHeaderLine;
 import java.io.File;
-import java.io.FileWriter;
 import java.util.*;
 
 /**
@@ -70,32 +71,23 @@ public class CapiceQuickFilter {
         /*
          * Initialize the VCF reader
          */
-        BlockCompressedInputStream is = new BlockCompressedInputStream(input);
-        VcfReader r = new VcfReader(is);
-        VcfMeta vm = r.getVcfMeta();
-
+        VCFFileReader r = new VCFFileReader(input, false);
         /*
          * Prepare objects to store output
          */
-        HashMap<String, List<String>> geneToHetZyg = new HashMap<>();
-        HashMap<String, List<String>> reportedVariants = new HashMap<>();
+        HashMap<String, List<VariantContext>> geneToHetZyg = new HashMap<>();
+        HashMap<String, List<VariantContext>> reportedVariants = new HashMap<>();
         reportedVariants.put(DE_NOVO, new ArrayList<>());
         reportedVariants.put(HOM_ALT, new ArrayList<>());
         reportedVariants.put(NON_AUT, new ArrayList<>());
         reportedVariants.put(COMPHET, new ArrayList<>());
 
         /*
-         * Create output file writer
-         */
-        FileWriter fw = new FileWriter(output);
-        BufferedWriter bw = new BufferedWriter(fw);
-
-        /*
          * Get the sample names from the VCF meta-data
          * TODO: verify that order is guaranteed
          */
         List<String> sampleNames = new ArrayList<>();
-        for(String sample: vm.getSampleNames()){
+        for(String sample: r.getFileHeader().getSampleNamesInOrder()){
             sampleNames.add(sample);
         }
 
@@ -108,35 +100,23 @@ public class CapiceQuickFilter {
         {
             throw new Exception("index sample id not found: " + caseSampleID);
         }
-        int caseSampleIndex = sampleNames.indexOf(caseSampleID);
-        List<Integer> controlSampleIndices = new ArrayList<Integer>();
-        for(String control : controlSampleIDs)
-        {
-            if(!sampleNames.contains(control))
-            {
-                throw new Exception("control sample id not found: " + control);
-            }
-            controlSampleIndices.add(sampleNames.indexOf(control));
-        }
-        List<Integer> allIndices = controlSampleIndices;
-        allIndices.add(caseSampleIndex);
 
         /*
          * Start iterating over the input VCF file
          */
-        Iterator<VcfRecord> vcfIt = r.iterator();
-        vcfIterator:
-        while(vcfIt.hasNext())
+        List<String> trio = new ArrayList<>();
+        trio.add(caseSampleID);
+        trio.addAll(controlSampleIDs);
+        for(VariantContext vc : r)
         {
-            VcfRecord vr = vcfIt.next();
             totalVariantCount++;
 
             /*
              * Retrieve GnomAD and CAPICE values if present
              */
             Double lowestGnomAD =
-                    Helper.getLowestGnomAD(vr.getInformation().iterator());
-            Double highestCapice = Helper.getHighestCapice(vr.getInformation().iterator());
+                    Helper.getLowestGnomAD(vc);
+            Double highestCapice = Helper.getHighestCapice(vc);
 
             /*
              * Keep track of missing GnomAD and CAPICE values
@@ -168,28 +148,22 @@ public class CapiceQuickFilter {
              * Now we need to investigate genotypes
              * Store case and control genotype in objects
              */
-            List<Allele> caseGeno = null;
-            HashMap<String, List<Allele>> controlGeno = new HashMap<>();
+            Genotype caseGeno = null;
+            HashMap<String, Genotype> controlGeno = new HashMap<>();
 
             /*
              * Iterate over samples and extract the case and control genotypes
              */
-            Iterator<VcfSample> vi = vr.getSamples().iterator();
-            VcfSample nextSample;
-            int sampleIndex = 0;
-            while(vi.hasNext())
+            for(String sample : vc.getSampleNamesOrderedByName())
             {
-                nextSample = vi.next();
-                if(sampleIndex == caseSampleIndex)
+                if(sample.equals(caseSampleID))
                 {
-                    caseGeno = nextSample.getAlleles();
+                    caseGeno = vc.getGenotype(caseSampleID);
                 }
-                else if(controlSampleIndices.contains(sampleIndex))
+                else if(controlSampleIDs.contains(sample))
                 {
-                    controlGeno.put(sampleNames.get(sampleIndex),
-                            nextSample.getAlleles());
+                    controlGeno.put(sample, vc.getGenotype(sample));
                 }
-                sampleIndex++;
             }
 
             /*
@@ -197,9 +171,9 @@ public class CapiceQuickFilter {
              * alleles and/or missing alleles
              */
             int caseAltCount = 0;
-            for(Allele a: caseGeno)
+            for(Allele a: caseGeno.getAlleles())
             {
-                if(!a.equals(Allele.ZERO) && !a.equals(vr.getReferenceAllele())) {
+                if(a.isNonRefAllele()) {
                     caseAltCount++;
                 }
             }
@@ -216,18 +190,18 @@ public class CapiceQuickFilter {
             boolean atLeastOneCtrlWithOneAlt = false;
             for(String key : controlGeno.keySet())
             {
-                List<Allele> controlAlleles = controlGeno.get(key);
+                Genotype controlAlleles = controlGeno.get(key);
                 int controlAltCount = 0;
-                for(Allele a: controlAlleles)
+                for(Allele a: controlAlleles.getAlleles())
                 {
-                    if(!a.equals(Allele.ZERO) && !a.equals(vr.getReferenceAllele())) {
+                    if(a.isNonRefAllele()) {
                         controlAltCount++;
                     }
                 }
                 if(controlAltCount == 2)
                 {
                     droppedByHomZygAltControlGeno++;
-                    continue vcfIterator;
+                    continue;
                 }
                 else if(controlAltCount == 1)
                 {
@@ -242,7 +216,7 @@ public class CapiceQuickFilter {
              */
             if(caseAltCount == 2)
             {
-                reportedVariants.get((Helper.isAutosomal(vr) ? HOM_ALT : NON_AUT)).add(Helper.retainIndices(vr.toString(), allIndices));
+                reportedVariants.get((Helper.isAutosomal(vc) ? HOM_ALT : NON_AUT)).add(Helper.retainIndices(vc, trio));
                 continue;
             }
 
@@ -253,7 +227,7 @@ public class CapiceQuickFilter {
              */
             if(caseAltCount == 1 && !atLeastOneCtrlWithOneAlt)
             {
-                reportedVariants.get((Helper.isAutosomal(vr) ? DE_NOVO : NON_AUT)).add(Helper.retainIndices(vr.toString(), allIndices));
+                reportedVariants.get((Helper.isAutosomal(vc) ? DE_NOVO : NON_AUT)).add(Helper.retainIndices(vc, trio));
                 continue;
             }
 
@@ -263,12 +237,12 @@ public class CapiceQuickFilter {
              * after we have seen all variants from this gene. Save for later.
              * Exception is variants on allosomes, always report these.
              */
-            Set<String> genes = Helper.getGenes(vr.getInformation().iterator());
+            Set<String> genes = Helper.getGenes(vc);
             if(caseAltCount == 1)
             {
-                if(!Helper.isAutosomal(vr))
+                if(!Helper.isAutosomal(vc))
                 {
-                    reportedVariants.get(NON_AUT).add(Helper.retainIndices(vr.toString(), allIndices));
+                    reportedVariants.get(NON_AUT).add(Helper.retainIndices(vc, trio));
                     continue;
                 }
                 else
@@ -279,7 +253,7 @@ public class CapiceQuickFilter {
                         {
                             geneToHetZyg.put(gene, new ArrayList<>());
                         }
-                        geneToHetZyg.get(gene).add(vr.toString());
+                        geneToHetZyg.get(gene).add(vc);
                     }
                       continue;
                 }
@@ -289,7 +263,7 @@ public class CapiceQuickFilter {
              * We should have covered all states when looping over all
              * variants in the input VCF. If not, crash the program.
              */
-            throw new Exception("Bad state: all possibilities should be covered by now. Offending variant: " + vr.toString());
+            throw new Exception("Bad state: all possibilities should be covered by now. Offending variant: " + vc.toStringDecodeGenotypes());
         }
 
 
@@ -298,14 +272,14 @@ public class CapiceQuickFilter {
          * heterozygous variants if there are two in one gene. Keep track
          * which are reported to prevent duplicates.
          */
-        Set<String> hasBeenReported = new HashSet<>();
-        Set<String> hasBeenDropped = new HashSet<>();
+        Set<VariantContext> hasBeenReported = new HashSet<>();
+        Set<VariantContext> hasBeenDropped = new HashSet<>();
         for(String gene : geneToHetZyg.keySet()) {
             if (geneToHetZyg.get(gene).size() > 1) {
-                for (String rec : geneToHetZyg.get(gene)) {
-                    if (!hasBeenReported.contains(rec)) {
-                        reportedVariants.get(COMPHET).add(Helper.retainIndices(rec, allIndices));
-                        hasBeenReported.add(rec);
+                for (VariantContext variantContext : geneToHetZyg.get(gene)) {
+                    if (!hasBeenReported.contains(variantContext)) {
+                        reportedVariants.get(COMPHET).add(Helper.retainIndices(variantContext, trio));
+                        hasBeenReported.add(variantContext);
                     }
                 }
             }
@@ -319,10 +293,10 @@ public class CapiceQuickFilter {
         for(String gene : geneToHetZyg.keySet()) {
             if (geneToHetZyg.get(gene).size() == 1)
             {
-                String rec = geneToHetZyg.get(gene).get(0);
-                if(!hasBeenDropped.contains(rec) && !hasBeenReported.contains(rec)) {
+                VariantContext variantContext = geneToHetZyg.get(gene).get(0);
+                if(!hasBeenDropped.contains(variantContext) && !hasBeenReported.contains(variantContext)) {
                     droppedByHetZygAltNoHetComp++;
-                    hasBeenDropped.add(rec);
+                    hasBeenDropped.add(variantContext);
                 }
             }
         }
@@ -336,72 +310,86 @@ public class CapiceQuickFilter {
                 droppedByGnomAD + droppedByCAPICE + droppedByNullOrRefCaseGeno + droppedByHomZygAltControlGeno + droppedByHetZygAltNoHetComp;
 
         /*
-         * Print the header with information in theo utput VCF file.
+         * Print the header with information in the output VCF file.
          * TODO: retain original header for proper meta-data
          * TODO: assign VCF version
          * TODO: perhaps sort output by chrom/pos instead of category
          */
-        bw.write("## Output of CapiceQuickFilter " + version + "\n");
-        bw.write("## Settings:\n");
-        bw.write("## - Input file: " + input.getAbsolutePath() + "\n");
-        bw.write("## - Output file: " + output.getAbsolutePath() + "\n");
-        bw.write("## - CAPICE threshold: " + capiceThreshold + "\n");
-        bw.write("## - GnomAD threshold: " + gnomadThreshold + "\n");
-        bw.write("## - Case sample ID: " + caseSampleID + "\n");
-        bw.write("## - Control sample IDs: " + controlSampleIDs + "\n");
-        bw.write("## Total number of variants processed: " + totalVariantCount + "\n");
-        bw.write("## Total number of potential candidates found: " + totalRep + "\n");
-        bw.write("## Breakdown of potential candidates by type:" + "\n");
-        bw.write("## - " + HOM_ALT + reportedVariants.get(HOM_ALT).size() + "\n");
-        bw.write("## - " + DE_NOVO + reportedVariants.get(DE_NOVO).size() + "\n");
-        bw.write("## - " + COMPHET + reportedVariants.get(COMPHET).size() + "\n");
-        bw.write("## - " + NON_AUT + reportedVariants.get(NON_AUT).size() + "\n");
-        bw.write("## Total number of variants dropped: " + totalDrop + "\n");
-        bw.write("## Breakdown of dropped variants by reason:" + "\n");
-        bw.write("## - CAPICE score below threshold = " + droppedByCAPICE + "\n");
-        bw.write("## - GnomAD allele frequency over threshold = " + droppedByGnomAD + "\n");
-        bw.write("## - Case genotype null or reference = " + droppedByNullOrRefCaseGeno + "\n");
-        bw.write("## - Homozygous control was present = " + droppedByHomZygAltControlGeno + "\n");
-        bw.write("## - Flagged for compound but no second hit: " + droppedByHetZygAltNoHetComp + "\n");
-        bw.write("## Additional information:" + "\n");
-        bw.write("## - Variants without GnomAD annotation: " + variantWithoutGnomAD + "\n");
-        bw.write("## - Variants without CAPICE annotation: " + variantWithoutCAPICE + "\n");
-        bw.write("## Potential candidates categorized by type (full info below, can be copy-pasted side by side):" + "\n");
+        VCFHeader header = r.getFileHeader();
+        header.addMetaDataLine(new VCFHeaderLine("1","Output of CapiceQuickFilter " + version));
+        header.addMetaDataLine(new VCFHeaderLine("2","Settings:"));
+        header.addMetaDataLine(new VCFHeaderLine("3","- Input file: " + input.getAbsolutePath()));
+        header.addMetaDataLine(new VCFHeaderLine("4","- Output file: " + output.getAbsolutePath()));
+        header.addMetaDataLine(new VCFHeaderLine("5","- CAPICE threshold: " + capiceThreshold));
+        header.addMetaDataLine(new VCFHeaderLine("6","- GnomAD threshold: " + gnomadThreshold));
+        header.addMetaDataLine(new VCFHeaderLine("7","- Case sample ID: " + caseSampleID));
+        header.addMetaDataLine(new VCFHeaderLine("8","- Control sample IDs: " + controlSampleIDs));
+        header.addMetaDataLine(new VCFHeaderLine("9","Total number of variants processed: " + totalVariantCount));
+        header.addMetaDataLine(new VCFHeaderLine("10","Total number of potential candidates found: " + totalRep));
+        header.addMetaDataLine(new VCFHeaderLine("11","Breakdown of potential candidates by type:"));
+        header.addMetaDataLine(new VCFHeaderLine("12","- " + HOM_ALT + reportedVariants.get(HOM_ALT).size()));
+        header.addMetaDataLine(new VCFHeaderLine("13","- " + DE_NOVO + reportedVariants.get(DE_NOVO).size()));
+        header.addMetaDataLine(new VCFHeaderLine("14","- " + COMPHET + reportedVariants.get(COMPHET).size()));
+        header.addMetaDataLine(new VCFHeaderLine("15","- " + NON_AUT + reportedVariants.get(NON_AUT).size()));
+        header.addMetaDataLine(new VCFHeaderLine("16","Total number of variants dropped: " + totalDrop));
+        header.addMetaDataLine(new VCFHeaderLine("17","Breakdown of dropped variants by reason:"));
+        header.addMetaDataLine(new VCFHeaderLine("18","- CAPICE score below threshold = " + droppedByCAPICE));
+        header.addMetaDataLine(new VCFHeaderLine("19","- GnomAD allele frequency over threshold = " + droppedByGnomAD));
+        header.addMetaDataLine(new VCFHeaderLine("20","- Case genotype null or reference = " + droppedByNullOrRefCaseGeno));
+        header.addMetaDataLine(new VCFHeaderLine("21","- Homozygous control was present = " + droppedByHomZygAltControlGeno));
+        header.addMetaDataLine(new VCFHeaderLine("22","- Flagged for compound but no second hit: " + droppedByHetZygAltNoHetComp));
+        header.addMetaDataLine(new VCFHeaderLine("23","Additional information:"));
+        header.addMetaDataLine(new VCFHeaderLine("24","- Variants without GnomAD annotation: " + variantWithoutGnomAD));
+        header.addMetaDataLine(new VCFHeaderLine("25","- Variants without CAPICE annotation: " + variantWithoutCAPICE));
+        header.addMetaDataLine(new VCFHeaderLine("26","Potential candidates categorized by type (full info below, can be copy-pasted side by side):"));
         for(String key : reportedVariants.keySet())
         {
-            for(String variant : reportedVariants.get(key))
+            int i = 26;
+            for(VariantContext variantContext : reportedVariants.get(key))
             {
-                bw.write("## " + key + (variant.length() > 50 ?
-                        variant.substring(0, 50).replace("\t", " ") :
-                        variant.replace("\t", " ")) + "\n");
+                i++;
+                String variant = variantContext.toString();
+                header.addMetaDataLine(new VCFHeaderLine(""+i,key + (variant.length() > 70 ?
+                        variant.substring(0, 70).replace("\t", " ") :
+                        variant.replace("\t", " "))));
             }
         }
 
+        Set<VCFHeaderLine> lines = new HashSet<>();
+        for(VCFHeaderLine line : header.getMetaDataInInputOrder()){
+            if(!(line instanceof VCFSampleHeaderLine)){
+                lines.add(line);
+            }
+        }
+        List<String> sortedSampleNames = new LinkedList<>();
+        for(String sample: header.getSampleNamesInOrder()){
+            if(trio.contains(sample)){
+                sortedSampleNames.add(sample);
+            }
+        }
+        VCFHeader vcfHeader = new VCFHeader(lines, sortedSampleNames);
+        VariantContextWriter writer = createVCFWriter(output, vcfHeader);
         /*
          * Print the VCF columns with sample names and then all variant data.
          * By sorting the indices first, we maintain the same order used in
          * retainIndices() to print the genotypes.
          */
-        Collections.sort(allIndices);
-        StringBuilder sb = new StringBuilder();
-        for(int index : allIndices)
-        {
-            sb.append("\t");
-            sb.append(sampleNames.get(index));
-        }
-        bw.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT" + sb.toString() + "\n");
+        Collections.sort(trio);
         for(String key : reportedVariants.keySet())
         {
-            for(String variant : reportedVariants.get(key))
-            {
-                bw.write(variant + "\n");
+            for(VariantContext variantContext : reportedVariants.get(key)) {
+                writer.add(variantContext);
             }
         }
+        writer.close();
+    }
 
-        /*
-         * Flush and close file writer.
-         */
-        bw.flush();
-        bw.close();
+    static VariantContextWriter createVCFWriter(final File outFile, VCFHeader header) {
+        VariantContextWriterBuilder vcWriterBuilder =
+            new VariantContextWriterBuilder().clearOptions().setOutputFile(outFile);
+        VariantContextWriter writer = vcWriterBuilder.build();
+
+        writer.writeHeader(header);
+        return writer;
     }
 }
